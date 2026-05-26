@@ -1,7 +1,11 @@
 [package]
 name = "freefreelist"
 version = "0.1.0"
+authors = ["Raphael Larsen <raphael.j.larsen@gmail.com>"]
 edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/larsraph/freefreelist"
+description = "A concurrent SPMC item reuse implimentation"
 
 [dependencies]
 crossbeam-utils = { version = "0.8.21", default-features = false }
