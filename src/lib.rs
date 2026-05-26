@@ -57,15 +57,15 @@ impl<T> Publication<T> {
     }
 }
 
-pub struct RemoteFreeList<T> {
+pub struct RemoteFreeFreeList<T> {
     publication: UnsafeCell<Publication<T>>,
     claim: CachePadded<AtomicI32>,
     len: CachePadded<AtomicU32>,
 }
 
-unsafe impl<T: Send> Sync for RemoteFreeList<T> {}
+unsafe impl<T: Send> Sync for RemoteFreeFreeList<T> {}
 
-impl<T> Default for RemoteFreeList<T> {
+impl<T> Default for RemoteFreeFreeList<T> {
     fn default() -> Self {
         Self {
             publication: UnsafeCell::new(Publication::default()),
@@ -75,7 +75,7 @@ impl<T> Default for RemoteFreeList<T> {
     }
 }
 
-impl<T> RemoteFreeList<T> {
+impl<T> RemoteFreeFreeList<T> {
     /// Returns weather or not all values of the Publication have been poped.
     pub fn is_empty(&self) -> bool {
         self.len.load(Ordering::Acquire) == 0
@@ -85,7 +85,7 @@ impl<T> RemoteFreeList<T> {
     /// may return `None` even if there are recyclable values.
     ///
     /// If you call this function a large number of times (`i32::MAX - 1`) before a single `sync`
-    /// call in the owning `FreeList` the behavior is undefined.
+    /// call in the owning `FreeFreeList` the behavior is undefined.
     pub fn pop(&self) -> Option<T> {
         let index = self.claim.fetch_sub(1, Ordering::Acquire).wrapping_sub(1);
         if index < 0 {
@@ -139,7 +139,7 @@ impl<T> RemoteFreeList<T> {
     }
 }
 
-impl<T> Drop for RemoteFreeList<T> {
+impl<T> Drop for RemoteFreeFreeList<T> {
     fn drop(&mut self) {
         let len = *self.len.get_mut();
         let publication = self.publication.get_mut();
@@ -151,34 +151,34 @@ impl<T> Drop for RemoteFreeList<T> {
     }
 }
 
-/// A `FreeList` that can hand out a `RemoteFreeList` to cheaply pop items from any thread.
-pub struct FreeList<'a, T> {
-    remote: &'a RemoteFreeList<T>,
+/// A `FreeFreeList` that can hand out a `RemoteFreeFreeList` to cheaply pop items from any thread.
+pub struct FreeFreeList<'a, T> {
+    remote: &'a RemoteFreeFreeList<T>,
     local: Vec<T>,
 }
 
-impl<T> FreeList<'static, T> {
-    /// Leaks a `RemoteFreeList` and returns a `FreeList` that uses it.
+impl<T> FreeFreeList<'static, T> {
+    /// Leaks a `RemoteFreeFreeList` and returns a `FreeFreeList` that uses it.
     pub fn new_leaked() -> Self {
-        let remote = Box::leak(Box::new(RemoteFreeList::default()));
+        let remote = Box::leak(Box::new(RemoteFreeFreeList::default()));
         Self::new(remote)
     }
 }
 
-impl<'a, T> FreeList<'a, T> {
-    /// Creates a new `FreeList` with a `RemoteFreeList` of lifetime `'a`.
+impl<'a, T> FreeFreeList<'a, T> {
+    /// Creates a new `FreeFreeList` with a `RemoteFreeFreeList` of lifetime `'a`.
     ///
-    /// Takes a mutable reference to the `RemoteFreeList` to ensure only one `FreeList`
-    /// receives ownership of the `RemoteFreeList`.
-    pub fn new(remote: &'a mut RemoteFreeList<T>) -> Self {
+    /// Takes a mutable reference to the `RemoteFreeFreeList` to ensure only one `FreeFreeList`
+    /// receives ownership of the `RemoteFreeFreeList`.
+    pub fn new(remote: &'a mut RemoteFreeFreeList<T>) -> Self {
         Self {
             remote,
             local: Vec::new(),
         }
     }
 
-    /// Returns a reference to the `RemoteFreeList`.
-    pub fn get_remote(&self) -> &'a RemoteFreeList<T> {
+    /// Returns a reference to the `RemoteFreeFreeList`.
+    pub fn get_remote(&self) -> &'a RemoteFreeFreeList<T> {
         self.remote
     }
 
@@ -187,7 +187,7 @@ impl<'a, T> FreeList<'a, T> {
         self.local.drain(range_from..)
     }
 
-    /// If the `RemoteFreeList` is empty then we drain half of the `local` FreeList into it.
+    /// If the `RemoteFreeFreeList` is empty then we drain half of the `local` FreeFreeList into it.
     pub fn sync(&mut self) {
         if self.remote.is_empty() {
             // Safety: We just checked `is_empty()`.
@@ -200,14 +200,14 @@ impl<'a, T> FreeList<'a, T> {
         }
     }
 
-    /// Pushes an item onto the `FreeList`.
+    /// Pushes an item onto the `FreeFreeList`.
     ///
-    /// Does NOT affect the `RemoteFreeList`.
+    /// Does NOT affect the `RemoteFreeFreeList`.
     pub fn push_local(&mut self, item: T) {
         self.local.push(item);
     }
 
-    /// Pushes an item onto the `FreeList` and synchronizes with the `RemoteFreeList` every `N` items.
+    /// Pushes an item onto the `FreeFreeList` and synchronizes with the `RemoteFreeFreeList` every `N` items.
     pub fn push_sync_every<const N: usize>(&mut self, item: T) {
         self.push_local(item);
         if self.local.len().is_multiple_of(N) {
@@ -215,19 +215,19 @@ impl<'a, T> FreeList<'a, T> {
         }
     }
 
-    /// Pushes and item onto the `FreeList` and synchronizes with the `RemoteFreeList`.
+    /// Pushes and item onto the `FreeFreeList` and synchronizes with the `RemoteFreeFreeList`.
     pub fn push_sync(&mut self, item: T) {
         self.push_sync_every::<1>(item);
     }
 
-    /// Pops an item from the `local` `FreeList`. Keep in mind that this is a best-effort pop.
-    /// This may return `None` even if the `FreeList` is has items.
+    /// Pops an item from the `local` `FreeFreeList`. Keep in mind that this is a best-effort pop.
+    /// This may return `None` even if the `FreeFreeList` is has items.
     pub fn pop_local(&mut self) -> Option<T> {
         self.local.pop()
     }
 
-    /// Pops an item from the `RemoteFreeList`. Keep in mind that this is a best-effort pop.
-    /// This may return `None` even if the `RemoteFreeList` is has items.
+    /// Pops an item from the `RemoteFreeFreeList`. Keep in mind that this is a best-effort pop.
+    /// This may return `None` even if the `RemoteFreeFreeList` is has items.
     pub fn pop_remote(&self) -> Option<T> {
         self.remote.pop()
     }
