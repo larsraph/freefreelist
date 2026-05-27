@@ -132,7 +132,8 @@ impl<T> RemoteFreeFreeList<T> {
         }
         // len must be updated first to ensure that poppers don't see a stale `len` value but a
         // up-to-date `claim` value.
-        // Is `Ordering::Relaxed` because `claim` is the atomic boundary.
+        // Is `Ordering::Relaxed` because `claim` is the atomic boundary for pop operations. We don't
+        // need a memory fence for other `len` checks because this is an exclusive publisher.
         self.len.store(len as u32, Ordering::Relaxed);
         // `Ordering::Release` to ensure that the `publication` is visible to other threads.
         self.claim.store(len as i32, Ordering::Release);
@@ -178,8 +179,16 @@ impl<'a, T> FreeFreeList<'a, T> {
     }
 
     /// Returns a reference to the `RemoteFreeFreeList`.
-    pub fn get_remote(&self) -> &'a RemoteFreeFreeList<T> {
+    pub fn remote(&self) -> &'a RemoteFreeFreeList<T> {
         self.remote
+    }
+
+    /// Returns a mutable reference to the `local` `Vec<T>`. This is where you can push (or pop)
+    /// items.
+    ///
+    /// After appending values to this `Vec` you should call `sync` to synchronize with the `RemoteFreeFreeList`.
+    pub fn local_mut(&mut self) -> &mut Vec<T> {
+        &mut self.local
     }
 
     fn drain_half(&mut self) -> impl ExactSizeIterator<Item = T> {
@@ -187,7 +196,7 @@ impl<'a, T> FreeFreeList<'a, T> {
         self.local.drain(range_from..)
     }
 
-    /// If the `RemoteFreeFreeList` is empty then we drain half of the `local` FreeFreeList into it.
+    /// If the `RemoteFreeFreeList` is empty then we drain half of the `local` `Vec<T>` into it.
     pub fn sync(&mut self) {
         if self.remote.is_empty() {
             // Safety: We just checked `is_empty()`.
@@ -200,33 +209,13 @@ impl<'a, T> FreeFreeList<'a, T> {
         }
     }
 
-    /// Pushes an item onto the `FreeFreeList`.
-    ///
-    /// Does NOT affect the `RemoteFreeFreeList`.
-    pub fn push_local(&mut self, item: T) {
-        self.local.push(item);
-    }
-
-    /// Pushes an item onto the `FreeFreeList` and synchronizes with the `RemoteFreeFreeList` every `N` items.
-    pub fn push_sync_every<const N: usize>(&mut self, item: T) {
-        self.push_local(item);
-        if self.local.len().is_multiple_of(N) {
-            self.sync();
-        }
-    }
-
-    /// Pushes and item onto the `FreeFreeList` and synchronizes with the `RemoteFreeFreeList`.
-    pub fn push_sync(&mut self, item: T) {
-        self.push_sync_every::<1>(item);
-    }
-
-    /// Pops an item from the `local` `FreeFreeList`. Keep in mind that this is a best-effort pop.
+    /// Pops an item from the `local` `Vec<T>`. Keep in mind that this is a best-effort pop.
     /// This may return `None` even if the `FreeFreeList` is has items.
     pub fn pop_local(&mut self) -> Option<T> {
         self.local.pop()
     }
 
-    /// Pops an item from the `RemoteFreeFreeList`. Keep in mind that this is a best-effort pop.
+    /// Pops an item from the `remote` `RemoteFreeFreeList`. Keep in mind that this is a best-effort pop.
     /// This may return `None` even if the `RemoteFreeFreeList` is has items.
     pub fn pop_remote(&self) -> Option<T> {
         self.remote.pop()
