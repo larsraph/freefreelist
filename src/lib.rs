@@ -1,8 +1,9 @@
 #![no_std]
 use core::{
     cell::UnsafeCell,
-    mem::ManuallyDrop,
-    ops::Range,
+    iter::FusedIterator,
+    mem::{self, ManuallyDrop},
+    ops::{Deref, DerefMut, Range},
     sync::atomic::{AtomicI32, AtomicU32, Ordering},
 };
 
@@ -19,6 +20,7 @@ use crossbeam_utils::CachePadded;
 /// all elements have been popped, the `len` field will yet again represent
 /// a valid `Vec` length.
 #[repr(transparent)]
+#[derive(Debug)]
 struct Publication<T>(ManuallyDrop<Vec<T>>);
 
 impl<T> Default for Publication<T> {
@@ -37,6 +39,7 @@ impl<T> Publication<T> {
     }
 }
 
+#[derive(Debug)]
 struct SharedState<T> {
     publication: UnsafeCell<Publication<T>>,
     head: CachePadded<AtomicI32>,
@@ -81,7 +84,7 @@ impl<T> SharedState<T> {
                 data.set_len(pop_to);
             }
 
-            core::mem::swap(data, &mut publication.0);
+            mem::swap(data, &mut publication.0);
 
             // the number of elements that will be popped.
             let eff_len = (len - pop_to) as u32;
@@ -98,7 +101,7 @@ impl<T> SharedState<T> {
         // `Ordering::Acquire` ensures we see any writes to `publication`.
         let index = self.head.fetch_sub(1, Ordering::Acquire).wrapping_sub(1);
         if index < 0 {
-            debug_assert_ne!(index, i32::MIN);
+            debug_assert_ne!(index, i32::MIN, "head overflow");
             return None;
         }
 
@@ -116,26 +119,7 @@ impl<T> SharedState<T> {
     }
 
     fn pop_n(&self, n: u32) -> PopN<'_, T> {
-        // `Ordering::Acquire` ensures we see any writes to `publication`.
-        let range_to = self.head.fetch_sub(n as i32, Ordering::Acquire);
-        if range_to <= 0 {
-            debug_assert!(range_to.wrapping_sub_unsigned(n) < 0);
-            return PopN(None);
-        }
-        let range_to = range_to as u32;
-        let range_from = range_to.saturating_sub(n);
-        let n = range_from - range_to;
-
-        // Safety: Since `tail >= head > 0` we know nobody is concurrently modifying the publication.
-        let publication = unsafe { self.publication.get().as_ref_unchecked() };
-
-        let range = (range_from as usize + publication.pop_offset())
-            ..(range_to as usize + publication.pop_offset());
-        // Safety: The `range` is guaranteed to be in bounds of the publication as it is bounded between
-        // the initially set `head` value and initally set `pop_offset` value. And each index only occurs once.
-        PopN(Some(unsafe {
-            InnerPopN::new(publication, range, &self.tail, n)
-        }))
+        PopN::new(self, n)
     }
 }
 
@@ -152,63 +136,82 @@ impl<T> Drop for SharedState<T> {
     }
 }
 
-pub struct PopN<'a, T>(Option<InnerPopN<'a, T>>);
+#[derive(Debug)]
+pub struct PopN<'a, T> {
+    publication: &'a UnsafeCell<Publication<T>>,
+    tail: &'a AtomicU32,
+    range: Range<i32>,
+    poped: u32,
+}
+
+impl<'a, T> PopN<'a, T> {
+    fn new(shared: &'a SharedState<T>, n: u32) -> Self {
+        // `Ordering::Acquire` ensures we see any writes to `publication`.
+        let range_to = shared.head.fetch_sub(n as i32, Ordering::Acquire);
+        let range_from = range_to.wrapping_sub_unsigned(n);
+        debug_assert!(range_from < range_to, "head overflow");
+        // When less than zero bring it back to zero... unless range_to is also less than zero,
+        // in which case they should be equal (so that poped is zero and range.next() returns None).
+        let range_from = range_from.max(0).min(range_to);
+        let poped = (range_to - range_from) as u32;
+        let range = range_from..range_to;
+
+        Self {
+            publication: &shared.publication,
+            tail: &shared.tail,
+            range,
+            poped,
+        }
+    }
+}
 
 impl<'a, T> Iterator for PopN<'a, T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.0.as_mut().and_then(InnerPopN::next)
-    }
-}
-
-struct InnerPopN<'a, T> {
-    publication: &'a Publication<T>,
-    range: Range<usize>,
-    tail: &'a AtomicU32,
-    n: u32,
-}
-
-impl<'a, T> InnerPopN<'a, T> {
-    // Safety: The `range` must be in bounds of the publication.
-    unsafe fn new(
-        publication: &'a Publication<T>,
-        range: Range<usize>,
-        tail: &'a AtomicU32,
-        n: u32,
-    ) -> Self {
-        Self {
-            publication,
-            range,
-            tail,
-            n,
-        }
-    }
-}
-
-impl<'a, T> Iterator for InnerPopN<'a, T> {
-    type Item = T;
-
-    fn next(&mut self) -> Option<Self::Item> {
         self.range.next().map(|index| {
-            // Safety: Ensured by caller of `PopN::new`.
-            unsafe { self.publication.read(index) }
+            // Safety: During creation of `PopN` our `range` only has values if the `head > 0`.
+            // We do this now and not in `PopN::new` because in `PopN::new` we don't want to
+            // branch on `poped > 0`.
+            let publication = unsafe { self.publication.get().as_ref_unchecked() };
+            // usize cast doesn't wrap because if `range_to` is less than zero then `range_from == range_to` and no items will be yielded.
+            let index = index as usize + publication.pop_offset();
+            // Safety: `index` is within range which is bounded to `head + pop_offset` and `pop_offset` and no index is
+            // poped twice.
+            unsafe { publication.read(index) }
         })
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.range.size_hint()
+    }
 }
 
-impl<'a, T> Drop for InnerPopN<'a, T> {
+impl<'a, T> ExactSizeIterator for PopN<'a, T> {}
+
+impl<'a, T> FusedIterator for PopN<'a, T> {}
+
+impl<'a, T> Drop for PopN<'a, T> {
     fn drop(&mut self) {
         for _ in self.into_iter() {}
         // `Ordering::Release` ensures that all reads happen before the decrement of `tail`.
-        self.tail.fetch_sub(self.n, Ordering::Release);
+        self.tail.fetch_sub(self.poped, Ordering::Release);
     }
 }
 
 /// A reader for a [`FreeList`] that provides methods for popping values.
+#[derive(Debug, Clone)]
 pub struct FreeListReader<T> {
     shared: Arc<SharedState<T>>,
 }
+
+impl<T> PartialEq for FreeListReader<T> {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
+    }
+}
+
+impl<T> Eq for FreeListReader<T> {}
 
 impl<T> FreeListReader<T> {
     /// Pop a single value from the free list.
@@ -222,12 +225,13 @@ impl<T> FreeListReader<T> {
     }
 }
 
+#[derive(Debug)]
 pub struct FreeList<T> {
     shared: Arc<SharedState<T>>,
     local: Vec<T>,
 }
 
-impl<T> core::ops::Deref for FreeList<T> {
+impl<T> Deref for FreeList<T> {
     type Target = Vec<T>;
 
     fn deref(&self) -> &Self::Target {
@@ -235,7 +239,7 @@ impl<T> core::ops::Deref for FreeList<T> {
     }
 }
 
-impl<T> core::ops::DerefMut for FreeList<T> {
+impl<T> DerefMut for FreeList<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.local
     }
@@ -266,17 +270,13 @@ impl<T> FreeList<T> {
     /// Synchronizes the local `FreeList` with the shared state.
     ///
     /// This method must be called frequently. How frequently depends on your usage.
-    /// To be specific:
-    /// 1. The remote free list will never have any items.
-    /// 2. If this is not called between i32::MAX failed remote pop calls there will be undefined behavior.
+    ///
+    /// It checks if the `SharedState` is drained. If so it swaps the local `Vec` with the shared `Vec`.
     pub fn sync(&mut self) {
-        // Safety:
+        // Safety: We have exclusive access to `self` and this type is the only
+        // type that can publicly call this funciton.
         unsafe {
             self.shared.try_publish(&mut self.local);
         }
     }
-
-    // I do not provide methods for remote popping as you should always pop locally. If you need
-    // strong guarantees (that popping will always return a value if there is one) then you should
-    // not use this type.
 }
