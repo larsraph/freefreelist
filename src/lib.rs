@@ -7,7 +7,7 @@ use core::{
 
 extern crate alloc;
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 
 use crossbeam_utils::CachePadded;
 
@@ -153,71 +153,67 @@ impl<T> Drop for RemoteFreeFreeList<T> {
 }
 
 /// A `FreeFreeList` that can hand out a `RemoteFreeFreeList` to cheaply pop items from any thread.
-pub struct FreeFreeList<'a, T> {
-    remote: &'a RemoteFreeFreeList<T>,
+pub struct FreeFreeList<T> {
+    remote: Arc<RemoteFreeFreeList<T>>,
     local: Vec<T>,
 }
 
-impl<T> FreeFreeList<'static, T> {
-    /// Leaks a `RemoteFreeFreeList` and returns a `FreeFreeList` that uses it.
-    pub fn new_leaked() -> Self {
-        let remote = Box::leak(Box::new(RemoteFreeFreeList::default()));
-        Self::new(remote)
+impl<T> Default for FreeFreeList<T> {
+    fn default() -> Self {
+        Self {
+            remote: Arc::default(),
+            local: Vec::default(),
+        }
     }
 }
 
-impl<'a, T> FreeFreeList<'a, T> {
-    /// Creates a new `FreeFreeList` with a `RemoteFreeFreeList` of lifetime `'a`.
-    ///
-    /// Takes a mutable reference to the `RemoteFreeFreeList` to ensure only one `FreeFreeList`
-    /// receives ownership of the `RemoteFreeFreeList`.
-    pub fn new(remote: &'a mut RemoteFreeFreeList<T>) -> Self {
-        Self {
-            remote,
-            local: Vec::new(),
-        }
+impl<T> FreeFreeList<T> {
+    /// Creates a new `FreeFreeList`.
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// Returns a reference to the `RemoteFreeFreeList`.
-    pub fn remote(&self) -> &'a RemoteFreeFreeList<T> {
-        self.remote
+    /// Returns shared ownership to the `RemoteFreeFreeList`.
+    pub fn remote(&self) -> Arc<RemoteFreeFreeList<T>> {
+        self.remote.clone()
     }
 
-    /// Returns a mutable reference to the `local` `Vec<T>`. This is where you can push (or pop)
-    /// items.
+    /// Returns a mutable reference to the `local` `Vec<T>`. This is where you can push (or pop) items.
     ///
-    /// After appending values to this `Vec` you should call `sync` to synchronize with the `RemoteFreeFreeList`.
+    /// After pushing values to this `Vec` you should call [`FreeFreeList:;sync`] to synchronize with the `RemoteFreeFreeList`.
     pub fn local_mut(&mut self) -> &mut Vec<T> {
         &mut self.local
-    }
-
-    fn drain_half(&mut self) -> impl ExactSizeIterator<Item = T> {
-        let range_from = self.local.len() / 2;
-        self.local.drain(range_from..)
     }
 
     /// If the `RemoteFreeFreeList` is empty then we drain half of the `local` `Vec<T>` into it.
     pub fn sync(&mut self) {
         if self.remote.is_empty() {
+            let range_from = self.local.len() / 2;
+            let data = self.local.drain(range_from..);
             // Safety: We just checked `is_empty()`.
-            // Since we have `&mut self`, we know no other thread can call
-            // `assume_exclusive_empty_publish` concurrently.
+            // Since we have `&mut self`, we know no other thread will call
+            // `assume_exclusive_empty_publish` concurrently as this structure is
+            // the only way to (safely) publish to the `RemoteFreeFreeList`.
             unsafe {
                 self.remote
-                    .publish_assume_exclusive_empty(self.drain_half());
+                    .publish_assume_exclusive_empty(data);
             };
         }
     }
 
     /// Pops an item from the `local` `Vec<T>`. Keep in mind that this is a best-effort pop.
-    /// This may return `None` even if the `FreeFreeList` is has items.
+    /// This may return `None` even if the `FreeFreeList` has items.
     pub fn pop_local(&mut self) -> Option<T> {
         self.local.pop()
     }
 
-    /// Pops an item from the `remote` `RemoteFreeFreeList`. Keep in mind that this is a best-effort pop.
-    /// This may return `None` even if the `RemoteFreeFreeList` is has items.
+    /// Pops an item from the `remote` [`RemoteFreeFreeList`]. Keep in mind that this is a best-effort pop.
+    /// This may return [`None`] even if the [`RemoteFreeFreeList`] has items.
     pub fn pop_remote(&self) -> Option<T> {
         self.remote.pop()
     }
+}
+
+fn a() {
+    let a = Arc::get_mut(this)
 }
