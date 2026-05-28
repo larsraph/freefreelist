@@ -3,7 +3,7 @@ use core::{
     cell::UnsafeCell,
     iter::FusedIterator,
     mem::{self, ManuallyDrop},
-    ops::{Deref, DerefMut, Range},
+    ops::Range,
     sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering},
 };
 
