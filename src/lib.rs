@@ -8,7 +8,7 @@ use core::{
 };
 
 extern crate alloc;
-use alloc::{sync::Arc, vec::Vec};
+use alloc::vec::Vec;
 
 use crossbeam_utils::CachePadded;
 
@@ -254,7 +254,7 @@ impl<'a, T> Drop for InnerPopN<'a, T> {
 // However I'm not sure if cache locality matters as much as cache invalidation... it's not like I've tested it
 // or have prior experience.
 #[derive(Debug)]
-struct SharedState<T> {
+pub struct SharedState<T> {
     a: SharedPopVec<T>,
     b: SharedPopVec<T>,
     prioritize_b: CachePadded<AtomicBool>,
@@ -271,7 +271,7 @@ impl<T> Default for SharedState<T> {
 }
 
 impl<T> SharedState<T> {
-    fn pop(&self) -> Option<T> {
+    pub fn pop(&self) -> Option<T> {
         if self.prioritize_b.load(Ordering::Relaxed) {
             self.b.pop().or_else(|| self.a.pop())
         } else {
@@ -279,7 +279,7 @@ impl<T> SharedState<T> {
         }
     }
 
-    fn pop_n(&self, n: u32) -> PopN<'_, T> {
+    pub fn pop_n(&self, n: u32) -> PopN<'_, T> {
         if self.prioritize_b.load(Ordering::Relaxed) {
             let a = self.b.pop_n(n);
             let rem = n - a.len() as u32;
@@ -295,7 +295,7 @@ impl<T> SharedState<T> {
 
     /// # Safety
     /// - You must be the exclusive publisher
-    unsafe fn try_publish(&self, data: &mut Vec<T>) {
+    pub unsafe fn try_publish(&self, data: &mut Vec<T>) {
         let a = self.a.tail.load(Ordering::Relaxed) == 0;
         let b = self.b.tail.load(Ordering::Relaxed) == 0;
         if !a && !b {
@@ -356,71 +356,3 @@ impl<'a, T> Iterator for PopN<'a, T> {
 
 impl<'a, T> ExactSizeIterator for PopN<'a, T> {}
 impl<'a, T> FusedIterator for PopN<'a, T> {}
-
-/// A reader for a [`FreeList`] that provides methods for popping values.
-#[derive(Debug, Clone)]
-pub struct FreeListReader<T> {
-    shared: Arc<SharedState<T>>,
-}
-
-impl<T> PartialEq for FreeListReader<T> {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.shared, &other.shared)
-    }
-}
-
-impl<T> Eq for FreeListReader<T> {}
-
-impl<T> FreeListReader<T> {
-    /// Pop a single value from the free list.
-    pub fn pop(&self) -> Option<T> {
-        self.shared.pop()
-    }
-
-    /// Pop up to `n` values from the free list.
-    pub fn pop_n(&self, n: u32) -> PopN<'_, T> {
-        self.shared.pop_n(n)
-    }
-}
-
-#[derive(Debug)]
-pub struct FreeList<T> {
-    shared: Arc<SharedState<T>>,
-    pub local: Vec<T>,
-}
-
-impl<T> Default for FreeList<T> {
-    fn default() -> Self {
-        Self {
-            shared: Default::default(),
-            local: Default::default(),
-        }
-    }
-}
-
-impl<T> FreeList<T> {
-    /// Creates a new `FreeList`.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Returns a `FreeListReader` that can be used to pop from the `FreeList`.
-    pub fn reader(&self) -> FreeListReader<T> {
-        FreeListReader {
-            shared: self.shared.clone(),
-        }
-    }
-
-    /// Synchronizes the local `FreeList` with the shared state.
-    ///
-    /// This method must be called frequently. How frequently depends on your usage.
-    ///
-    /// It checks if the `SharedState` is drained. If so it swaps the local `Vec` with the shared `Vec`.
-    pub fn sync(&mut self) {
-        // Safety: We have exclusive access to `self` and this type is the only
-        // type that can publicly call this funciton.
-        unsafe {
-            self.shared.try_publish(&mut self.local);
-        }
-    }
-}
