@@ -180,6 +180,9 @@ impl<'a, T> InnerPopN<'a, T> {
         // `Ordering::Acquire` ensures we see any writes to `publication`.
         let range_to = shared.head.fetch_sub(n as i32, Ordering::Acquire);
         let range_from = range_to.wrapping_sub_unsigned(n);
+        // WHEN `head == i32::MAX` and then we immidiately pop_n `u32::MAX` items this check will fail.
+        // With u32::MAX items split across 3 buffers this is unimaginably unlikely to happen and would
+        // probably just segfault. Still a vulnerability.
         if range_from >= range_to {
             SharedPopVec::<T>::on_overflow();
         }
