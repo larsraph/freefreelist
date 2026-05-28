@@ -365,21 +365,7 @@ impl<T> FreeListReader<T> {
 #[derive(Debug)]
 pub struct FreeList<T> {
     shared: Arc<SharedState<T>>,
-    local: Vec<T>,
-}
-
-impl<T> Deref for FreeList<T> {
-    type Target = Vec<T>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.local
-    }
-}
-
-impl<T> DerefMut for FreeList<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.local
-    }
+    pub local: Vec<T>,
 }
 
 impl<T> Default for FreeList<T> {
