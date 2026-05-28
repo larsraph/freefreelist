@@ -61,7 +61,7 @@ impl<T> Publication<T> {
 struct SharedPopVec<T> {
     /// The `Vec` being drained. As long as `tail != 0` this is immutable. When `tail == 0` the
     /// single producer has exclusive mutable access.
-    publication: UnsafeCell<Publication<T>>,
+    publication: CachePadded<UnsafeCell<Publication<T>>>,
     /// The number of items that are initalized and not currently being drained.
     /// Readers decriment this to reserve an item for reading.
     head: CachePadded<AtomicI32>,
@@ -94,6 +94,12 @@ impl<T> SharedPopVec<T> {
         // `Ordering::Acquire` ensures we see any writes to `publication`.
         let index = self.head.fetch_sub(1, Ordering::Acquire).wrapping_sub(1);
         if index < 0 {
+            // TODO: we can make this self correcting by doing CAS (not loop) to set head to zero
+            //
+            // we can attempt to do that at some reasonable number like `i32::MIN / 2` and if we fail
+            // a CAS _and_ we just overflowed we'll have to panic. (very unlikely)
+            //
+            // See also [`InnerPopN::new`]
             if index == i32::MAX {
                 Self::on_overflow();
             }
@@ -235,6 +241,16 @@ impl<'a, T> Drop for InnerPopN<'a, T> {
     }
 }
 
+// TODO: Currently this has 7 CachePadded fields. That's bad for locality but great for
+// parrallel throughput.
+//
+// To help locality without harming throughput I propose we group the variables as such:
+// (head, publiation) - Assuming `prioritize` is properly set (frequent calls to `sync`) then `head` and `publication` are almost never
+// mutated at the same time. Additionally every `pop` call needs both `head` and `publication`.
+// (tail_a, tail_b) - These are basically never mutated at the same time AND are polled together by `sync`.
+//
+// However I'm not sure if cache locality matters as much as cache invalidation... it's not like I've tested it
+// or have prior experience.
 #[derive(Debug)]
 struct SharedState<T> {
     a: SharedPopVec<T>,
