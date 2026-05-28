@@ -296,7 +296,7 @@ impl<T> SharedState<T> {
             self.prioritize_b.fetch_not(Ordering::Relaxed);
         }
         for (buffer, is_empty) in buffers {
-            if is_empty {
+            if !is_empty {
                 continue;
             }
             // `Acquire` any writes. We don't need the actual value because we already checked that the value
