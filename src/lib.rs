@@ -82,6 +82,7 @@ impl<T> Default for SharedPopVec<T> {
 }
 
 impl<T> SharedPopVec<T> {
+    // I saw this pattern in bevys remote_allocator internals
     /// This just panics.
     /// It is included to help with branch prediction, and put the panic message in one spot.
     #[cold]
@@ -137,6 +138,7 @@ impl<T> SharedPopVec<T> {
             publication.swap_as_drained(data, drain_from);
         }
 
+        // The number of to-be-drained elements.
         let eff_len = (len - drain_from) as u32;
         // `Ordering::Relaxed` because `head` fences the publication and we don't need
         // to fence with `tail.load`s because this design only allows for a single producer.
@@ -330,7 +332,10 @@ impl<T> SharedState<T> {
     }
 }
 
-/// Manual Chain operation. Theoretically more optimizable because Chain uses Option<T> for portability.
+/// Manual Chain operation. Theoretically more optimizable because Chain uses Option<T> for portability,
+/// however I doubt it matters at all in release mode.
+///
+/// TODO: consider type alias for Chain<>;
 pub struct PopN<'a, T> {
     a: InnerPopN<'a, T>,
     b: InnerPopN<'a, T>,
